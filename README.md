@@ -4,20 +4,37 @@ v1.0 · par dodosiiii
 
 Application Windows avec interface graphique : réglez un compte à rebours personnalisé et choisissez l'action à exécuter automatiquement à la fin (éteindre le PC, mettre en veille, redémarrer, verrouiller la session ou se déconnecter).
 
+
 Fonctionnalités
 -Réglage du temps en heures / minutes / secondes ou via les boutons rapides (1 min, 5 min, 10 min, 30 min, 1 h)
+
 -Compte à rebours animé avec anneau de progression circulaire (violet > 1 min, orange < 1 min, rouge < 10 s)
--Boutons Démarrer / Pause / Reprendre / Arrêter, avec raccourcis clavier :
--Espace : Démarrer / Pause / Reprendre
+
+Boutons: Démarrer / Pause / Reprendre / Arrêter
+
+
+raccourcis clavier :
+
+-Espace : Démarrer / Pause / Reprendre 
+
 -Échap : Arrêter (ou annuler l'exécution finale)
+
 -Icône dans la barre des tâches (zone de notification) :
+
 -affiche en permanence les minutes restantes et l'action prévue (infobulle)
+
 -un clic sur l'icône rouvre l'application
+
 -clic droit : Ouvrir, Pause / Reprendre, Arrêter, Quitter
+
 -Bouton dédié pour réduire directement dans la barre des tâches, en plus de la croix qui fait de même
+
 -Toujours au premier plan (optionnel) : garde la fenêtre visible par-dessus les autres
+
 -Son désactivé (optionnel) : coupe le bip de fin sans toucher au volume de Windows
+
 -Mémorisation des réglages : le dernier temps réglé, l'action choisie et vos préférences sont sauvegardés automatiquement et restaurés au prochain lancement
+
 -À la fin du compte à rebours : avertissement sonore (désactivable) + fenêtre de confirmation avec 3 secondes pour annuler
 
 
