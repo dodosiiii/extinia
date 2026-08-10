@@ -1,76 +1,100 @@
-Extinia
+# Extinia
 
-v1.0 · par dodosiiii
+**v1.1 · par dodosiiii**
 
-Application Windows avec interface graphique : réglez un compte à rebours personnalisé et choisissez l'action à exécuter automatiquement à la fin (éteindre le PC, mettre en veille, redémarrer, verrouiller la session ou se déconnecter).
+Application Windows avec interface graphique : réglez un compte à rebours personnalisé et
+choisissez l'action à exécuter automatiquement à la fin (éteindre le PC, mettre en veille,
+redémarrer, verrouiller la session ou se déconnecter).
 
+## Fonctionnalités
 
-Fonctionnalités
--Réglage du temps en heures / minutes / secondes ou via les boutons rapides (1 min, 5 min, 10 min, 30 min, 1 h)
+**Réglage du temps**
+- Champs heures / minutes / secondes ou boutons rapides (1 min, 5 min, 10 min, 30 min, 1 h)
+- Clic ou tabulation dans un champ : le contenu se sélectionne automatiquement, il suffit de
+  taper pour remplacer la valeur
+- **Molette de la souris** au-dessus d'un champ pour ajuster rapidement (+1 / -1)
+- **+1 min / +5 min** pendant le compte à rebours pour le rallonger sans tout arrêter
 
--Compte à rebours animé avec anneau de progression circulaire (violet > 1 min, orange < 1 min, rouge < 10 s)
+**Suivi visuel**
+- Anneau de progression circulaire (violet > 1 min, orange < 1 min, rouge < 10 s)
+- **Heure de fin prévue** affichée sous l'anneau (ex : « fin prévue à 23:45 »), y compris en
+  aperçu avant de démarrer
+- Boutons Démarrer / Pause / Reprendre / Arrêter, avec raccourcis clavier :
+  - **Espace** : Démarrer / Pause
+  - **Échap** : Arrêter (ou annuler l'action en cours de déclenchement)
 
-Boutons: Démarrer / Pause / Reprendre / Arrêter
+**Barre des tâches**
+- Icône dans la zone de notification, avec les **minutes restantes** et l'action prévue
+  (infobulle)
+- **Alertes automatiques** à 5 minutes et 1 minute restantes, même fenêtre réduite
+- **Icône clignotante** dans les 10 dernières secondes
+- Un **clic sur l'icône rouvre l'application** ; clic droit : Ouvrir, Pause / Reprendre,
+  Arrêter, Quitter
+- Bouton dédié (🗕) et croix de la fenêtre pour réduire dans la barre des tâches : le compte à
+  rebours continue en arrière-plan
 
+**Options**
+- **Toujours au premier plan** : garde la fenêtre visible par-dessus les autres
+- **Son désactivé** : coupe le bip de fin sans toucher au volume Windows
+- **Délai avant action configurable** (3 / 5 / 10 s) avant l'exécution automatique
+- **Préférences mémorisées** : temps, action et options sont sauvegardés automatiquement et
+  rechargés au prochain lancement
 
-raccourcis clavier :
+**Fin du compte à rebours**
+- Avertissement sonore (sauf si coupé) + fenêtre de confirmation avec le délai choisi pour
+  annuler ou exécuter immédiatement
+- Pendant cette confirmation, les contrôles principaux (Pause / Arrêter / +1 min / +5 min)
+  sont désactivés pour éviter toute action contradictoire : seuls **Annuler** et **Exécuter
+  maintenant** dans la fenêtre de confirmation (ou **Échap**) permettent de revenir en arrière
 
--Espace : Démarrer / Pause / Reprendre 
+**Actions disponibles**
+- Éteindre le PC
+- Mettre en veille
+- Redémarrer
+- Verrouiller la session
+- Déconnexion
 
--Échap : Arrêter (ou annuler l'exécution finale)
+## Installation
 
--Icône dans la barre des tâches (zone de notification) :
+### Avec Python
 
--affiche en permanence les minutes restantes et l'action prévue (infobulle)
-
--un clic sur l'icône rouvre l'application
-
--clic droit : Ouvrir, Pause / Reprendre, Arrêter, Quitter
-
--Bouton dédié pour réduire directement dans la barre des tâches, en plus de la croix qui fait de même
-
--Toujours au premier plan (optionnel) : garde la fenêtre visible par-dessus les autres
-
--Son désactivé (optionnel) : coupe le bip de fin sans toucher au volume de Windows
-
--Mémorisation des réglages : le dernier temps réglé, l'action choisie et vos préférences sont sauvegardés automatiquement et restaurés au prochain lancement
-
--À la fin du compte à rebours : avertissement sonore (désactivable) + fenêtre de confirmation avec 3 secondes pour annuler
-
-
-Actions disponibles :
--⏻ Éteindre le PC
--🌙 Mettre en veille
--⟳ Redémarrer
-🔒 Verrouiller la session
--⎋ Déconnexion
-
-Installation:
-Avec Python
-bash
+```bash
 pip install -r requirements.txt
 python main.py
-En .exe (optionnel)
-bash
+```
+
+### En .exe (optionnel)
+
+```bash
 pip install pyinstaller
 pyinstaller --onefile --windowed --name "extinia" main.py
+```
 
-L'exécutable se trouve dans dist/.
+L'exécutable se trouve dans `dist/`.
 
-Utilisation:
-Réglez le temps (champs ou boutons rapides).
-Choisissez l'action à exécuter à la fin.
-Cliquez sur Démarrer (ou appuyez sur Espace).
-Réduisez dans la barre des tâches si besoin (bouton dédié ou croix de fermeture) : l'icône affiche les minutes restantes.
+## Utilisation
 
-À la fin, une fenêtre s'affiche avec un compte à rebours de 3 secondes et un bouton Annuler si vous changez d'avis. L'action est exécutée même si la fenêtre est réduite.
+1. Réglez le temps (champs, molette, ou boutons rapides).
+2. Choisissez l'action à exécuter à la fin.
+3. Cliquez sur **Démarrer** (ou appuyez sur **Espace**).
+4. Réduisez dans la barre des tâches si besoin : l'icône affiche les minutes restantes et
+   vous prévient à 5 min et 1 min de la fin.
 
-Structure du projet
-Fichier	Rôle
-main.py	Point d'entrée de l'application
-app.py	Interface graphique (Tkinter) et logique d'affichage
-config.py	Identité de l'application et palette de couleurs
-settings.py	Sauvegarde / chargement des préférences (%APPDATA%\Extinia)
-countdown.py	Logique du compte à rebours, basée sur le temps réel
-actions.py	Actions système exécutées à la fin (extinction, veille, etc.)
-tray.py	Icône et menu dans la barre des tâches
+À la fin, une fenêtre s'affiche avec un compte à rebours (délai configurable) et un bouton
+**Annuler** si vous changez d'avis. L'action est exécutée même si la fenêtre est réduite.
+
+## Structure du projet
+
+| Fichier | Rôle |
+|---|---|
+| `main.py` | Point d'entrée de l'application |
+| `app.py` | Interface graphique (tkinter) et logique de contrôle |
+| `config.py` | Nom de l'application, version, auteur, palette de couleurs |
+| `countdown.py` | Logique du compte à rebours, basée sur le temps réel |
+| `actions.py` | Actions système Windows (éteindre, veille, redémarrer, verrouiller, déconnexion) |
+| `tray.py` | Icône et menu de la barre des tâches |
+| `settings.py` | Sauvegarde / chargement des préférences (`%APPDATA%\Extinia\settings.json`) |
+
+## Licence
+
+MIT

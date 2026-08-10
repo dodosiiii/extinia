@@ -10,6 +10,7 @@ DEFAULTS = {
     "action": "shutdown",
     "always_on_top": False,
     "mute": False,
+    "confirm_delay": 3,
 }
 
 

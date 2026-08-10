@@ -2,7 +2,7 @@
 
 APP_NAME = "Extinia"
 APP_TAGLINE = "Minuteur d'extinction"
-APP_VERSION = "v1.0"
+APP_VERSION = "v1.1"
 APP_AUTHOR = "dodosiiii"
 
 # --- Palette (thème sombre, accent violet) ---

@@ -38,5 +38,17 @@ class Countdown:
         """Redémarre le compte à rebours avec le temps restant si encore en cours."""
         self.start()
 
+    def extend(self, seconds: float) -> None:
+        """Ajoute du temps au compte à rebours en cours (ou en pause)."""
+        add = max(float(seconds), 0.0)
+        if add <= 0:
+            return
+        self.total += add
+        if self.running:
+            self.remaining = self.remaining_left() + add
+            self.end_time = time.monotonic() + self.remaining
+        else:
+            self.remaining += add
+
     def is_finished(self) -> bool:
         return self.running and self.remaining_left() <= 0.0

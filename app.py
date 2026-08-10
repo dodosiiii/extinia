@@ -1,6 +1,7 @@
 """Interface graphique tkinter d'Extinia (compte à rebours PC)."""
 
 import base64
+import datetime
 import io
 import math
 import tkinter as tk
@@ -135,6 +136,7 @@ class App:
         self.action_var = tk.StringVar(value=self.prefs.get("action", "shutdown"))
         self.always_on_top_var = tk.BooleanVar(value=self.prefs.get("always_on_top", False))
         self.mute_var = tk.BooleanVar(value=self.prefs.get("mute", False))
+        self.confirm_delay_var = tk.IntVar(value=self.prefs.get("confirm_delay", 3))
         self.tray = Tray(self)
         self._execute_after_id = None
         self._overlay = None
@@ -142,6 +144,9 @@ class App:
         self._tray_state = "stopped"
         self._finishing = False
         self._paused = False
+        self._blink_off = False
+        self._blink_counter = 0
+        self._alerted = set()
 
         self._setup_styles()
         self._build_ui()
@@ -231,6 +236,20 @@ class App:
             style.map("TCheckbutton",
                       indicatorbackground=[("selected", ACCENT), ("active", "#343a49")],
                       foreground=[("selected", TEXT), ("active", TEXT)])
+
+            style.configure("OptionRadio.TRadiobutton", background=BG, foreground=MUTED,
+                            indicatorbackground=FIELD, indicatorforeground=BG,
+                            borderwidth=0, font=(FONT, 9), padding=(2, 3))
+            style.map("OptionRadio.TRadiobutton",
+                      indicatorbackground=[("selected", ACCENT), ("active", "#343a49")],
+                      foreground=[("selected", TEXT), ("active", TEXT)])
+
+            style.configure("Extend.TButton", background=FIELD, bordercolor=CARD_BORDER,
+                            padding=(10, 6), font=(FONT, 9, "bold"), relief="flat")
+            style.map("Extend.TButton", background=[("active", ACCENT_SOFT), ("pressed", ACCENT_SOFT),
+                                                     ("disabled", BG)],
+                      bordercolor=[("active", ACCENT)],
+                      foreground=[("active", ACCENT), ("disabled", MUTED)])
         except Exception:
             pass
 
@@ -240,10 +259,11 @@ class App:
         outer = tk.Frame(self.root, bg=BG)
         outer.grid(row=0, column=0, sticky="nsew")
         outer.columnconfigure(0, weight=1)
+        outer.columnconfigure(1, weight=1)
 
         # --- en-tête ---
         header = tk.Frame(outer, bg=BG)
-        header.grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 4))
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", padx=20, pady=(18, 4))
         if getattr(self, "_logo_photo", None) is not None:
             tk.Label(header, image=self._logo_photo, bg=BG).pack(side="left", padx=(0, 10))
         title_box = tk.Frame(header, bg=BG)
@@ -259,39 +279,41 @@ class App:
         Tooltip(reduce_btn, "Réduire dans la barre des tâches")
 
         divider = tk.Frame(outer, bg=CARD_BORDER, height=1)
-        divider.grid(row=1, column=0, sticky="ew", padx=20, pady=(2, 10))
+        divider.grid(row=1, column=0, columnspan=2, sticky="ew", padx=20, pady=(2, 10))
 
-        # --- carte : temps avant action ---
-        ttk.Label(outer, text="TEMPS AVANT ACTION", style="BoxLabel.TLabel").grid(
-            row=2, column=0, sticky="w", padx=24, pady=(0, 4))
+        # --- carte : temps avant action (colonne gauche) ---
+        ttk.Label(outer, text="DURÉE", style="BoxLabel.TLabel").grid(
+            row=2, column=0, sticky="w", padx=20, pady=(0, 4))
 
         card_time = RoundedCard(outer, radius=16)
-        card_time.grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 16))
+        card_time.grid(row=3, column=0, sticky="nw", padx=(20, 10), pady=(0, 12))
 
         boxes = tk.Frame(card_time.body, bg=CARD)
-        boxes.pack(padx=16, pady=(16, 8))
-        self.hours = self._time_box(boxes, "HEURES", "0")
+        boxes.pack(padx=14, pady=(14, 8))
+        self.hours = self._time_box(boxes, "H", "0", max_value=99)
         self._sep(boxes)
-        self.minutes = self._time_box(boxes, "MINUTES", "10")
+        self.minutes = self._time_box(boxes, "MIN", "10", max_value=59)
         self._sep(boxes)
-        self.seconds = self._time_box(boxes, "SECONDES", "0")
+        self.seconds = self._time_box(boxes, "SEC", "0", max_value=59)
 
         presets = tk.Frame(card_time.body, bg=CARD)
-        presets.pack(fill="x", padx=16, pady=(4, 16))
-        ttk.Label(presets, text="RAPIDE", style="CardBoxLabel.TLabel").pack(side="left", padx=(0, 8))
+        presets.pack(fill="x", padx=14, pady=(4, 14))
+        ttk.Label(presets, text="RAPIDE", style="CardBoxLabel.TLabel").pack(anchor="w", pady=(0, 5))
+        presets_row = tk.Frame(presets, bg=CARD)
+        presets_row.pack(fill="x")
         self.preset_buttons = []
         for name, seconds in PRESETS.items():
-            btn = ttk.Button(presets, text=name, style="Chip.TButton", width=6,
+            btn = ttk.Button(presets_row, text=name, style="Chip.TButton", width=5,
                              command=lambda s=seconds: self._set_time(s))
-            btn.pack(side="left", padx=3)
+            btn.pack(side="left", padx=2, fill="x", expand=True)
             self.preset_buttons.append(btn)
 
-        # --- carte : action à la fin ---
-        ttk.Label(outer, text="ACTION À LA FIN DU COMPTE À REBOURS", style="BoxLabel.TLabel").grid(
-            row=4, column=0, sticky="w", padx=24, pady=(0, 4))
+        # --- carte : action à la fin (colonne droite) ---
+        ttk.Label(outer, text="ACTION FINALE", style="BoxLabel.TLabel").grid(
+            row=2, column=1, sticky="w", padx=(10, 20), pady=(0, 4))
 
         card_action = RoundedCard(outer, radius=16)
-        card_action.grid(row=5, column=0, sticky="ew", padx=20, pady=(0, 8))
+        card_action.grid(row=3, column=1, sticky="nw", padx=(10, 20), pady=(0, 12))
 
         action_body = tk.Frame(card_action.body, bg=CARD)
         action_body.pack(fill="x", padx=12, pady=10)
@@ -304,8 +326,11 @@ class App:
             self.radio_buttons.append(rb)
 
         # --- options ---
-        options = tk.Frame(outer, bg=BG)
-        options.grid(row=6, column=0, sticky="ew", padx=24, pady=(0, 2))
+        options_row = tk.Frame(outer, bg=BG)
+        options_row.grid(row=4, column=0, columnspan=2, sticky="ew", padx=20, pady=(0, 2))
+
+        options = tk.Frame(options_row, bg=BG)
+        options.pack(side="left")
         top_chk = ttk.Checkbutton(options, text="Toujours au premier plan",
                                   variable=self.always_on_top_var,
                                   command=self._on_toggle_always_on_top)
@@ -314,27 +339,36 @@ class App:
                                    variable=self.mute_var, command=self._save_prefs)
         mute_chk.pack(side="left", padx=(16, 0))
 
+        delay_row = tk.Frame(options_row, bg=BG)
+        delay_row.pack(side="right")
+        tk.Label(delay_row, text="Délai :", bg=BG, fg=MUTED,
+                 font=(FONT, 9)).pack(side="left", padx=(0, 6))
+        for value in (3, 5, 10):
+            ttk.Radiobutton(delay_row, text=f"{value}s", value=value,
+                            variable=self.confirm_delay_var, style="OptionRadio.TRadiobutton",
+                            command=self._save_prefs).pack(side="left")
+
         # --- anneau de temps restant ---
         ring = tk.Frame(outer, bg=BG)
-        ring.grid(row=7, column=0, sticky="ew", pady=(12, 0))
+        ring.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         ttk.Label(ring, text="TEMPS RESTANT", style="BoxLabel.TLabel").pack(pady=(2, 0))
-        self.canvas = tk.Canvas(ring, width=222, height=206, bg=BG, highlightthickness=0)
+        self.canvas = tk.Canvas(ring, width=200, height=200, bg=BG, highlightthickness=0)
         self.canvas.pack(pady=(4, 0))
-        self._ring_halo = self.canvas.create_oval(9, 5, 213, 209, outline=CARD_BORDER, width=1)
-        self._ring_bg = self.canvas.create_oval(21, 17, 201, 197, outline=CARD_BORDER, width=13)
-        self._ring = self.canvas.create_arc(21, 17, 201, 197, start=90, extent=0,
-                                            style="arc", outline=ACCENT, width=13)
+        self._ring_halo = self.canvas.create_oval(10, 10, 190, 190, outline=CARD_BORDER, width=1)
+        self._ring_bg = self.canvas.create_oval(17, 17, 183, 183, outline=CARD_BORDER, width=12)
+        self._ring = self.canvas.create_arc(17, 17, 183, 183, start=90, extent=0,
+                                            style="arc", outline=ACCENT, width=12)
         self.time_label = self.canvas.create_text(
-            111, 100, text=format_time(self.countdown.total),
-            font=(FONT, 36, "bold"), fill=ACCENT,
+            100, 92, text=format_time(self.countdown.total),
+            font=(FONT, 30, "bold"), fill=ACCENT,
         )
         self.duration_label = self.canvas.create_text(
-            111, 132, text="", font=(FONT, 9), fill=MUTED,
+            100, 122, text="", font=(FONT, 9), fill=MUTED,
         )
 
         # --- boutons de contrôle ---
         frame_buttons = tk.Frame(outer, bg=BG)
-        frame_buttons.grid(row=8, column=0, pady=(14, 6))
+        frame_buttons.grid(row=6, column=0, columnspan=2, pady=(12, 6))
         self.start_btn = ttk.Button(frame_buttons, text="▶  Démarrer", style="Accent.TButton",
                                     width=14, command=self._start)
         self.pause_btn = ttk.Button(frame_buttons, text="⏸  Pause", width=11,
@@ -348,9 +382,18 @@ class App:
         Tooltip(self.pause_btn, "Espace")
         Tooltip(self.stop_btn, "Échap")
 
+        extend_row = tk.Frame(outer, bg=BG)
+        extend_row.grid(row=7, column=0, columnspan=2, pady=(0, 8))
+        self.extend1_btn = ttk.Button(extend_row, text="+1 min", style="Extend.TButton",
+                                      command=lambda: self._extend(60), state="disabled")
+        self.extend5_btn = ttk.Button(extend_row, text="+5 min", style="Extend.TButton",
+                                      command=lambda: self._extend(300), state="disabled")
+        self.extend1_btn.pack(side="left", padx=3)
+        self.extend5_btn.pack(side="left", padx=3)
+
         # --- pied de page ---
         footer = tk.Frame(outer, bg=BG)
-        footer.grid(row=9, column=0, sticky="ew", padx=20, pady=(6, 16))
+        footer.grid(row=8, column=0, columnspan=2, sticky="ew", padx=20, pady=(6, 16))
         footer.columnconfigure(0, weight=1)
 
         status_box = tk.Frame(footer, bg=BG)
@@ -371,15 +414,38 @@ class App:
         tk.Label(parent, text=":", bg=CARD, fg=MUTED,
                  font=(FONT, 18, "bold")).pack(side="left", padx=2, pady=(0, 16))
 
-    def _time_box(self, parent: tk.Frame, label: str, value: str) -> ttk.Entry:
+    def _time_box(self, parent: tk.Frame, label: str, value: str, max_value: int = 59) -> ttk.Entry:
         f = tk.Frame(parent, bg=CARD)
         f.pack(side="left", padx=6)
         e = ttk.Entry(f, width=3, justify="center", style="Big.TEntry")
         e.insert(0, value)
         e.bind("<KeyRelease>", lambda _ev: self._preview_typed_time())
+        # Sélectionne tout le contenu au focus : taper remplace directement la valeur.
+        e.bind("<FocusIn>", lambda _ev, ent=e: ent.after(1, lambda: ent.select_range(0, "end")))
+        e.bind("<Button-1>", lambda _ev, ent=e: ent.after(1, lambda: ent.select_range(0, "end")))
+        # Molette de la souris pour ajuster rapidement la valeur.
+        e.bind("<MouseWheel>", lambda ev, ent=e, mx=max_value: self._wheel_adjust(ent, ev, mx))
+        e.bind("<Button-4>", lambda ev, ent=e, mx=max_value: self._wheel_adjust(ent, ev, mx, force_up=True))
+        e.bind("<Button-5>", lambda ev, ent=e, mx=max_value: self._wheel_adjust(ent, ev, mx, force_down=True))
         e.pack()
         ttk.Label(f, text=label, style="CardBoxLabel.TLabel").pack(pady=(4, 0))
         return e
+
+    def _wheel_adjust(self, entry: ttk.Entry, event, max_value: int,
+                       force_up: bool = False, force_down: bool = False) -> None:
+        if str(entry.cget("state")) == "disabled":
+            return
+        try:
+            current = int(entry.get() or 0)
+        except ValueError:
+            current = 0
+        up = force_up or (not force_down and getattr(event, "delta", 0) > 0)
+        current = current + 1 if up else current - 1
+        current = max(0, min(current, max_value))
+        entry.delete(0, "end")
+        entry.insert(0, str(current))
+        self._preview_typed_time()
+        self._save_prefs()
 
     # --- préférences ---
 
@@ -401,6 +467,7 @@ class App:
             "action": self.action_var.get(),
             "always_on_top": self.always_on_top_var.get(),
             "mute": self.mute_var.get(),
+            "confirm_delay": self.confirm_delay_var.get(),
         }
 
     def _save_prefs(self) -> None:
@@ -483,15 +550,32 @@ class App:
             self.countdown.reset(total)
             self._save_prefs()
         self._paused = False
+        self._alerted = set()
         self.countdown.start()
         self.start_btn.config(state="disabled")
         self.pause_btn.config(state="normal")
         self.stop_btn.config(state="normal")
+        self.extend1_btn.config(state="normal")
+        self.extend5_btn.config(state="normal")
         self._set_inputs_enabled(False)
         self._last_tray_sec = -1
         self._refresh_display()
         self._update_tray("running")
         self._set_status(f"En cours — {self._action_label()} dans {format_time(self.countdown.remaining_left())}.", "running")
+
+    def _extend(self, seconds: int) -> None:
+        if not (self.countdown.running or self._paused):
+            return
+        self.countdown.extend(seconds)
+        remaining_now = self.countdown.remaining_left() if self.countdown.running else self.countdown.remaining
+        # Si on rallonge le temps au-delà d'un seuil déjà notifié, on le réarme
+        # pour qu'il puisse à nouveau prévenir quand le compte y repassera.
+        self._alerted = {t for t in self._alerted if remaining_now <= t}
+        self._refresh_display()
+        state = "running" if self.countdown.running else "paused"
+        self._update_tray(state)
+        minutes_added = seconds // 60
+        self._set_status(f"+{minutes_added} min ajoutée(s). Fin dans {format_time(remaining_now)}.", state)
 
     def _pause(self) -> None:
         if not self.countdown.running:
@@ -510,6 +594,8 @@ class App:
         self.start_btn.config(text="▶  Démarrer", state="normal")
         self.pause_btn.config(state="disabled")
         self.stop_btn.config(state="disabled")
+        self.extend1_btn.config(state="disabled")
+        self.extend5_btn.config(state="disabled")
         self._set_inputs_enabled(True)
         self._refresh_display()
         self._update_tray("stopped")
@@ -544,8 +630,14 @@ class App:
         if remaining is None:
             remaining = self.countdown.remaining_left()
         total = max(self.countdown.total, 1)
-        self.canvas.itemconfig(self.time_label, text=format_time(remaining))
-        self.canvas.itemconfig(self.duration_label, text=f"sur {format_time(self.countdown.total)}")
+        text = format_time(remaining)
+        font_size = 21 if len(text) > 5 else 30
+        self.canvas.itemconfig(self.time_label, text=text, font=(FONT, font_size, "bold"))
+
+        base_seconds = remaining if self.countdown.running else self.countdown.total
+        finish_at = datetime.datetime.now() + datetime.timedelta(seconds=max(base_seconds, 0))
+        self.canvas.itemconfig(self.duration_label, text=f"fin prévue à {finish_at.strftime('%H:%M')}")
+
         self.canvas.itemconfig(
             self._ring, extent=-int(360 * max(remaining, 0) / total)
         )
@@ -562,18 +654,39 @@ class App:
         if self.countdown.running:
             remaining = self.countdown.remaining_left()
             self._refresh_display(remaining)
-            if int(remaining) != self._last_tray_sec:
+            self._check_alerts(remaining)
+            if remaining <= 10:
+                self._blink_counter += 1
+                if self._blink_counter >= 3:
+                    self._blink_counter = 0
+                    self._blink_off = not self._blink_off
+            else:
+                self._blink_counter = 0
+                self._blink_off = False
+            if int(remaining) != self._last_tray_sec or remaining <= 10:
                 self._last_tray_sec = int(remaining)
                 self._update_tray("running")
             if self.countdown.is_finished() and not self._finishing:
                 self._finish()
         self.root.after(200, self._tick)
 
+    def _check_alerts(self, remaining: float) -> None:
+        for threshold, label in ((300, "5 minutes"), (60, "1 minute")):
+            if (remaining <= threshold and threshold not in self._alerted
+                    and self.countdown.total > threshold):
+                self._alerted.add(threshold)
+                self.tray.notify(f"Encore {label} avant : {self._action_label()}.")
+
     # --- fin du compte à rebours ---
 
     def _finish(self) -> None:
         self._finishing = True
         self._last_tray_sec = -1
+        self._blink_off = False
+        self.pause_btn.config(state="disabled")
+        self.stop_btn.config(state="disabled")
+        self.extend1_btn.config(state="disabled")
+        self.extend5_btn.config(state="disabled")
         self._update_tray("running")
         if not self.mute_var.get():
             try:
@@ -582,7 +695,8 @@ class App:
             except Exception:
                 pass
         self.show_window()
-        self._execute_after_id = self.root.after(3000, self._do_execute)
+        delay_ms = max(int(self.confirm_delay_var.get()), 1) * 1000
+        self._execute_after_id = self.root.after(delay_ms, self._do_execute)
         self._show_overlay()
 
     def _show_overlay(self) -> None:
@@ -598,7 +712,7 @@ class App:
                  font=(FONT, 14, "bold")).pack(padx=24, pady=(18, 3))
         tk.Label(card.body, text=f"Action : {self._action_label()}",
                  bg=CARD, fg=ACCENT, font=(FONT, 11, "bold")).pack(padx=24, pady=(0, 4))
-        tk.Label(card.body, text="L'exécution se lance dans 3 secondes…",
+        tk.Label(card.body, text=f"L'exécution se lance dans {self.confirm_delay_var.get()} secondes…",
                  bg=CARD, fg=MUTED, font=(FONT, 10)).pack(padx=24, pady=(0, 12))
         btns = tk.Frame(card.body, bg=CARD)
         btns.pack(pady=(0, 18))
@@ -624,6 +738,8 @@ class App:
         self.start_btn.config(text="▶  Démarrer", state="normal")
         self.pause_btn.config(state="disabled")
         self.stop_btn.config(state="disabled")
+        self.extend1_btn.config(state="disabled")
+        self.extend5_btn.config(state="disabled")
         self._set_inputs_enabled(True)
         self._refresh_display()
         self._update_tray("stopped")
@@ -649,6 +765,8 @@ class App:
         self.start_btn.config(text="▶  Démarrer", state="normal")
         self.pause_btn.config(state="disabled")
         self.stop_btn.config(state="disabled")
+        self.extend1_btn.config(state="disabled")
+        self.extend5_btn.config(state="disabled")
         self._set_inputs_enabled(True)
         self._refresh_display()
         self._update_tray("stopped")
@@ -668,7 +786,7 @@ class App:
         else:
             minutes = 0
             tooltip = f"{APP_NAME} — prêt, réglez un temps"
-        self.tray.refresh(state, tooltip, minutes)
+        self.tray.refresh(state, tooltip, minutes, self._blink_off)
 
     def show_window(self) -> None:
         self.root.deiconify()

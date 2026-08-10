@@ -39,8 +39,12 @@ def logo_image(size: int = 64) -> Image.Image:
     return img
 
 
-def status_image(state: str, minutes: int) -> Image.Image:
-    """Image de l'icône selon l'état : temps restant en gros chiffres."""
+def status_image(state: str, minutes: int, blink_off: bool = False) -> Image.Image:
+    """Image de l'icône selon l'état : temps restant en gros chiffres.
+
+    blink_off=True dans les 10 dernières secondes fait clignoter l'icône
+    (alterne entre le rouge plein et une version atténuée).
+    """
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -66,7 +70,7 @@ def status_image(state: str, minutes: int) -> Image.Image:
     elif minutes >= 1:
         bg = WARN
     else:
-        bg = DANGER
+        bg = IDLE if blink_off else DANGER
     img2 = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d2 = ImageDraw.Draw(img2)
     d2.rounded_rectangle([0, 0, size - 1, size - 1], radius=size // 5, fill=bg)
@@ -109,16 +113,16 @@ class Tray:
         self.icon = pystray.Icon(APP_NAME.lower(), logo_image(64), APP_NAME, menu)
         threading.Thread(target=self.icon.run, daemon=True).start()
 
-    def refresh(self, state: str, tooltip: str, minutes: int = 0) -> None:
+    def refresh(self, state: str, tooltip: str, minutes: int = 0, blink_off: bool = False) -> None:
         if self.icon is None:
             return
         self.icon.title = tooltip
         try:
-            self.icon.update_image(status_image(state, minutes))
+            self.icon.update_image(status_image(state, minutes, blink_off))
         except AttributeError:
             # Versions récentes de pystray : pas de update_image(),
             # on réassigne directement la propriété .icon.
-            self.icon.icon = status_image(state, minutes)
+            self.icon.icon = status_image(state, minutes, blink_off)
 
     def notify(self, message: str) -> None:
         if self.icon is None:
