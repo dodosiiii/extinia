@@ -30,9 +30,20 @@ def load() -> dict:
     try:
         with open(_settings_path(), "r", encoding="utf-8") as f:
             data = json.load(f)
-        for key in DEFAULTS:
-            if key in data:
-                merged[key] = data[key]
+        for key, default in DEFAULTS.items():
+            if key not in data:
+                continue
+            value = data[key]
+            if isinstance(default, bool):
+                if isinstance(value, bool):
+                    merged[key] = value
+            elif isinstance(default, int):
+                try:
+                    merged[key] = max(int(value), 0)
+                except (TypeError, ValueError):
+                    pass
+            else:
+                merged[key] = value
     except Exception:
         pass
     return merged

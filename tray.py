@@ -134,10 +134,17 @@ class Tray:
 
     def stop(self) -> None:
         if self.icon is not None:
+            # Visible=False retire l'icône de la zone de notification
+            # immédiatement (avant que le thread pystray ne s'arrête).
+            try:
+                self.icon.visible = False
+            except Exception:
+                pass
             try:
                 self.icon.stop()
             except Exception:
                 pass
+            self.icon = None
 
     def _open(self, _icon=None, _item=None) -> None:
         self.app.root.after(0, self.app.show_window)

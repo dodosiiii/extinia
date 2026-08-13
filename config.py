@@ -2,7 +2,7 @@
 
 APP_NAME = "Extinia"
 APP_TAGLINE = "Minuteur d'extinction"
-APP_VERSION = "v1.1"
+APP_VERSION = "v1.5"
 APP_AUTHOR = "dodosiiii"
 
 # --- Palette (thème sombre, accent violet) ---
@@ -17,6 +17,7 @@ ACCENT_DOWN = "#6a5aee"  # violet (état actif/pressé)
 ACCENT_SOFT = "#211f3d"  # fond doux pour éléments accentués (pilule version, etc.)
 WARN = "#f2a93c"         # orange (avertissement / pause)
 DANGER = "#ff5d6c"       # rouge (urgence / <10s)
+DANGER_DIM = "#7a3a46"   # rouge atténué (clignotement des 10 dernières secondes)
 IDLE = "#3a3f4d"          # gris (état arrêté)
 SHADOW = "#0a0b10"       # ombre portée sous les cartes
 
