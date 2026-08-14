@@ -1,58 +1,440 @@
-"""Interface graphique tkinter d'Extinia (compte à rebours PC)."""
+"""Extinia — Compte à rebours PC (fichier unique).
+
+Application tkinter : minuteur avant extinction / veille / redémarrage /
+verrouillage / déconnexion, avec icône dans la barre des tâches (pystray),
+mode mini flottant, et sauvegarde des préférences.
+
+Ce fichier regroupe tout le programme (anciennement réparti entre config.py,
+settings.py, countdown.py, actions.py, tray.py, app.py et main.py) pour
+n'avoir qu'un seul fichier à distribuer/exécuter :
+
+    python extinia.py
+
+Dépendances optionnelles (l'appli fonctionne sans, avec des fonctionnalités
+réduites) :
+    pip install pystray pillow
+
+Corrections apportées lors de la fusion (voir CHANGELOG en bas de fichier) :
+  - Bug critique : l'appli plantait au démarrage si Pillow n'était pas
+    installé (NameError caché dans des annotations de type).
+  - Fluidité : l'anneau de temps restant n'est plus détruit/recréé à
+    chaque redimensionnement de fenêtre (juste déplacé), et le halo
+    lumineux (coûteux) n'est redessiné qu'une fois le redimensionnement
+    terminé, au lieu de ~30 fois par seconde pendant qu'on tire la fenêtre.
+  - Consommation : l'icône de la barre des tâches n'est régénérée que si
+    son apparence change réellement (au lieu de plusieurs fois par
+    seconde), et l'anneau cesse de se redessiner quand la fenêtre est
+    cachée dans le tray.
+  - Bug : reprendre un compte à rebours après une pause réarmait à tort
+    les notifications « 5 minutes » / « 1 minute » déjà déclenchées.
+"""
 
 import base64
+import ctypes
 import datetime
 import io
+import json
 import math
 import os
+import subprocess
+import sys
+import threading
 import time
 import tkinter as tk
 import traceback
 from tkinter import ttk
 
-import actions
-import settings
-from config import (
-    ACCENT,
-    ACCENT_DOWN,
-    ACCENT_SOFT,
-    APP_AUTHOR,
-    APP_NAME,
-    APP_TAGLINE,
-    APP_VERSION,
-    BG,
-    CARD,
-    CARD_BORDER,
-    DANGER,
-    DANGER_DIM,
-    FIELD,
-    FONT,
-    MUTED,
-    SHADOW,
-    TEXT,
-    WARN,
-)
-from countdown import Countdown
-from tray import Tray, logo_image
-
 try:
-    from PIL import Image, ImageDraw, ImageTk
-
+    from PIL import Image, ImageDraw, ImageFont, ImageTk
     PILLOW_AVAILABLE = True
 except Exception:
     Image = None
     ImageDraw = None
+    ImageFont = None
     ImageTk = None
     PILLOW_AVAILABLE = False
+
+try:
+    import pystray
+    # pystray a besoin de Pillow pour construire les icônes.
+    TRAY_AVAILABLE = PILLOW_AVAILABLE
+except Exception:
+    pystray = None
+    TRAY_AVAILABLE = False
+
+
+# ============================================================================
+# Identité de l'application et palette de couleurs
+# ============================================================================
+
+APP_NAME = "Extinia"
+APP_TAGLINE = "Minuteur d'extinction"
+APP_VERSION = "v1.3"
+APP_AUTHOR = "dodosiiii"
+
+# --- Palette (thème sombre, accent violet) ---
+# v1.3 : fond plus profond, cartes mieux définies, accent plus vif — pour un
+# rendu plus riche et un meilleur contraste des éléments entre eux.
+BG = "#0c0d13"           # fond de la fenêtre (plus profond qu'en v1.2)
+CARD = "#181b26"         # fond des cartes
+CARD_BORDER = "#2d3348"  # contour des cartes (un peu plus marqué : meilleure définition)
+FIELD = "#1e2330"        # fond des champs de saisie
+TEXT = "#f3f4fa"         # texte principal (légèrement plus clair)
+MUTED = "#9297ac"        # texte secondaire
+ACCENT = "#8577ff"       # violet principal (plus vif qu'en v1.2)
+ACCENT_DOWN = "#7264ee"  # violet (état actif/pressé)
+ACCENT_SOFT = "#242145"  # fond doux pour éléments accentués (pilule version, etc.)
+ACCENT_HOVER = "#9c90ff"  # violet clair (survol léger)
+WARN = "#f5ac3f"         # orange (avertissement / pause)
+DANGER = "#ff6472"       # rouge (urgence / <10s)
+DANGER_DIM = "#823c49"   # rouge atténué (clignotement des 10 dernières secondes)
+IDLE = "#3d4353"         # gris (état arrêté)
+SHADOW = "#08090d"       # ombre portée sous les cartes
+SUCCESS = "#4ade80"      # vert (action terminée avec succès)
+
+FONT = "Segoe UI"
+
+
+# ============================================================================
+# Préférences utilisateur (sauvegarde JSON dans %APPDATA%)
+# ============================================================================
+
+DEFAULTS = {
+    "hours": 0,
+    "minutes": 10,
+    "seconds": 0,
+    "action": "shutdown",
+    "always_on_top": False,
+    "mute": False,
+    "confirm_delay": 3,
+}
+
+
+def _settings_path() -> str:
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    folder = os.path.join(base, "Extinia")
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except Exception:
+        return os.path.join(os.path.expanduser("~"), ".extinia_settings.json")
+    return os.path.join(folder, "settings.json")
+
+
+def settings_load() -> dict:
+    """Charge les préférences sauvegardées, ou les valeurs par défaut si absentes/corrompues."""
+    merged = DEFAULTS.copy()
+    try:
+        with open(_settings_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        for key, default in DEFAULTS.items():
+            if key not in data:
+                continue
+            value = data[key]
+            if isinstance(default, bool):
+                if isinstance(value, bool):
+                    merged[key] = value
+            elif isinstance(default, int):
+                try:
+                    merged[key] = max(int(value), 0)
+                except (TypeError, ValueError):
+                    pass
+            else:
+                merged[key] = value
+    except Exception:
+        pass
+    return merged
+
+
+def settings_save(data: dict) -> None:
+    """Sauvegarde les préférences. Échoue silencieusement si le disque est inaccessible."""
+    try:
+        with open(_settings_path(), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+# ============================================================================
+# Logique du compte à rebours (indépendante des ticks UI)
+# ============================================================================
+
+class Countdown:
+    """Compte à rebours démarré / mis en pause / réinitialisé à la demande."""
+
+    def __init__(self, total_seconds: float) -> None:
+        self.total = max(float(total_seconds), 0.0)
+        self.remaining = self.total
+        self.running = False
+        self.end_time: float | None = None
+
+    def start(self) -> None:
+        self.running = True
+        self.end_time = time.monotonic() + max(self.remaining, 0.0)
+
+    def pause(self) -> None:
+        if self.running:
+            self.remaining = self.remaining_left()
+        self.running = False
+        self.end_time = None
+
+    def reset(self, total_seconds: float | None = None) -> None:
+        if total_seconds is not None:
+            self.total = max(float(total_seconds), 0.0)
+        self.remaining = self.total
+        self.running = False
+        self.end_time = None
+
+    def remaining_left(self) -> float:
+        if not self.running:
+            return self.remaining
+        return max(self.end_time - time.monotonic(), 0.0)
+
+    def restart(self) -> None:
+        """Redémarre le compte à rebours avec le temps restant si encore en cours."""
+        self.start()
+
+    def extend(self, seconds: float) -> None:
+        """Ajoute du temps au compte à rebours en cours (ou en pause)."""
+        add = max(float(seconds), 0.0)
+        if add <= 0:
+            return
+        self.total += add
+        if self.running:
+            self.remaining = self.remaining_left() + add
+            self.end_time = time.monotonic() + self.remaining
+        else:
+            self.remaining += add
+
+    def is_finished(self) -> bool:
+        return self.running and self.remaining_left() <= 0.0
+
+
+# ============================================================================
+# Actions système exécutées en fin de compte à rebours (Windows)
+# ============================================================================
+
+ACTIONS = {
+    "shutdown": "Éteindre le PC",
+    "veille": "Mettre en veille",
+    "restart": "Redémarrer",
+    "lock": "Verrouiller la session",
+    "logout": "Déconnexion",
+}
+
+
+def eteindre() -> None:
+    subprocess.run(["shutdown", "/s", "/t", "0"], check=False)
+
+
+def redemarrer() -> None:
+    subprocess.run(["shutdown", "/r", "/t", "0"], check=False)
+
+
+def deconnexion() -> None:
+    subprocess.run(["shutdown", "/l"], check=False)
+
+
+def veille() -> None:
+    try:
+        ctypes.windll.powrprof.SetSuspendState(0, 1, 0)
+    except Exception:
+        subprocess.run(
+            ["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"], check=False
+        )
+
+
+def verrouiller() -> None:
+    ctypes.windll.user32.LockWorkStation()
+
+
+def execute_action(action_key: str) -> None:
+    FUNCTIONS = {
+        "shutdown": eteindre,
+        "veille": veille,
+        "restart": redemarrer,
+        "lock": verrouiller,
+        "logout": deconnexion,
+    }
+    FUNCTIONS[action_key]()
+
+
+# ============================================================================
+# Icône dans la barre des tâches (zone de notification Windows)
+# ============================================================================
+
+def _font(size: int, bold: bool = False) -> "ImageFont.ImageFont":
+    # NB : l'annotation est en chaîne ("...") pour ne PAS être évaluée à la
+    # définition de la fonction. Avant ce correctif, si Pillow était absent,
+    # `ImageFont.ImageFont` (nom non importé) provoquait un NameError au
+    # simple import de ce module -> l'appli entière plantait au démarrage
+    # au lieu de se rabattre gracieusement sur le mode "sans icône".
+    try:
+        name = "segoeuib.ttf" if bold else "segoeui.ttf"
+        return ImageFont.truetype(name, size)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def logo_image(size: int = 64) -> "Image.Image":
+    """Logo de l'application : carré arrondi bleu avec une horloge blanche."""
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([0, 0, size - 1, size - 1], radius=size // 5, fill=ACCENT)
+    cx = cy = size / 2
+    r = size * 0.30
+    w = max(2, size // 14)
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], outline="white", width=w)
+    d.line([cx, cy, cx, cy - r * 0.62], fill="white", width=w)
+    d.line([cx, cy, cx + r * 0.45, cy + r * 0.12], fill="white", width=w)
+    return img
+
+
+def status_image(state: str, minutes: int, blink_off: bool = False) -> "Image.Image":
+    """Image de l'icône selon l'état : temps restant en gros chiffres.
+
+    blink_off=True dans les 10 dernières secondes fait clignoter l'icône
+    (alterne entre le rouge plein et une version atténuée).
+    """
+    size = 64
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([0, 0, size - 1, size - 1], radius=size // 5, fill=IDLE)
+
+    if state == "paused":
+        bar_w = size // 8
+        gap = size // 5
+        rel = size // 8
+        for x in (rel, rel + gap, rel + 2 * gap):
+            d.rectangle([x, size // 3, x + bar_w, size - size // 3], fill="white")
+        return img
+    if state == "stopped":
+        d.ellipse(
+            [size // 2 - size // 6, size // 2 - size // 6,
+             size // 2 + size // 6, size // 2 + size // 6],
+            outline="white", width=size // 16,
+        )
+        return img
+
+    if minutes > 10:
+        bg = ACCENT
+    elif minutes >= 1:
+        bg = WARN
+    else:
+        bg = IDLE if blink_off else DANGER
+    img2 = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d2 = ImageDraw.Draw(img2)
+    d2.rounded_rectangle([0, 0, size - 1, size - 1], radius=size // 5, fill=bg)
+    text = str(min(minutes, 999))
+    if len(text) <= 2:
+        font = _font(32, bold=True)
+    else:
+        font = _font(24, bold=True)
+    box = d2.textbbox((0, 0), text, font=font)
+    d2.text(
+        ((size - (box[2] - box[0])) / 2 - box[0],
+         (size - (box[3] - box[1])) / 2 - box[1]),
+        text, font=font, fill="white",
+    )
+    return img2
+
+
+class Tray:
+    """Icône de la zone de notification, reliée à l'application."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+        self.icon = None
+        # Cache du dernier état dessiné : évite de regénérer une image
+        # Pillow (coûteux en CPU) quand rien n'a réellement changé, ce qui
+        # arrivait avant à chaque tick (jusqu'à 5x/s) même si l'icône
+        # affichée à l'écran restait identique.
+        self._last_image_key = None
+
+    @property
+    def available(self) -> bool:
+        return TRAY_AVAILABLE
+
+    def start(self) -> None:
+        if not TRAY_AVAILABLE:
+            return
+        menu = pystray.Menu(
+            pystray.MenuItem(f"Ouvrir {APP_NAME}", self._open, default=True),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Pause / Reprendre", self._toggle),
+            pystray.MenuItem("Arrêter le compte à rebours", self._stop),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Quitter", self._quit),
+        )
+        self.icon = pystray.Icon(APP_NAME.lower(), logo_image(64), APP_NAME, menu)
+        threading.Thread(target=self.icon.run, daemon=True).start()
+
+    def refresh(self, state: str, tooltip: str, minutes: int = 0, blink_off: bool = False) -> None:
+        if self.icon is None:
+            return
+        if self.icon.title != tooltip:
+            self.icon.title = tooltip
+        # Ne redessine l'image (opération Pillow non triviale : création
+        # d'image, tracé, mesure de texte) que si l'état visuel a
+        # réellement changé depuis le dernier appel.
+        key = (state, minutes, blink_off)
+        if key == self._last_image_key:
+            return
+        self._last_image_key = key
+        image = status_image(state, minutes, blink_off)
+        try:
+            self.icon.update_image(image)
+        except AttributeError:
+            # Versions récentes de pystray : pas de update_image(),
+            # on réassigne directement la propriété .icon.
+            self.icon.icon = image
+
+    def notify(self, message: str) -> None:
+        if self.icon is None:
+            return
+        try:
+            self.icon.notify(message, APP_NAME)
+        except Exception:
+            pass
+
+    def stop(self) -> None:
+        if self.icon is not None:
+            # Visible=False retire l'icône de la zone de notification
+            # immédiatement (avant que le thread pystray ne s'arrête).
+            try:
+                self.icon.visible = False
+            except Exception:
+                pass
+            try:
+                self.icon.stop()
+            except Exception:
+                pass
+            self.icon = None
+
+    def _open(self, _icon=None, _item=None) -> None:
+        self.app.root.after(0, self.app.show_window)
+
+    def _toggle(self, _icon=None, _item=None) -> None:
+        self.app.root.after(0, self.app.toggle_from_tray)
+
+    def _stop(self, _icon=None, _item=None) -> None:
+        self.app.root.after(0, self.app.stop_from_tray)
+
+    def _quit(self, _icon=None, _item=None) -> None:
+        self.app.root.after(0, self.app.quit_from_tray)
+
+
+# ============================================================================
+# Interface graphique (tkinter)
+# ============================================================================
 
 PRESETS = {"1 min": 60, "5 min": 300, "10 min": 600, "30 min": 1800, "1 h": 3600}
 
 if PILLOW_AVAILABLE:
     _RESAMPLE = getattr(Image, "Resampling", Image).LANCZOS
     GLOW_COLORS = {
-        "accent": (124, 108, 255),
-        "warn": (242, 169, 60),
-        "danger": (255, 93, 108),
+        "accent": (133, 119, 255),
+        "warn": (245, 172, 63),
+        "danger": (255, 100, 114),
     }
 
 
@@ -64,7 +446,8 @@ def _make_glow(size: int = 128) -> dict:
         px = img.load()
         c = size / 2
         max_r = size / 2 - 1
-        peak = 55 if key == "warn" else 70
+        # v1.3 : halos un peu plus présents pour un rendu plus riche.
+        peak = 62 if key == "warn" else 80
         for y in range(size):
             for x in range(size):
                 r = ((x - c + 0.5) ** 2 + (y - c + 0.5) ** 2) ** 0.5 / max_r
@@ -179,8 +562,10 @@ class RoundedCard(tk.Frame):
         self._body_item = self.canvas.create_window(2, 2, window=self.body, anchor="nw")
         self._card_item = None
         self._shadow_item = None
+        self._hl_item = None
+        self._draw_pending = False
         self.body.bind("<Configure>", self._sync)
-        self.canvas.bind("<Configure>", self._draw)
+        self.canvas.bind("<Configure>", self._on_configure)
 
     def _sync(self, _event=None) -> None:
         # Taille minimale du canvas = contenu + ombre ; au-delà, il s'étire
@@ -191,9 +576,22 @@ class RoundedCard(tk.Frame):
         )
         self._draw()
 
+    def _on_configure(self, _event=None) -> None:
+        # Regroupe les événements <Configure> qui peuvent arriver très
+        # fréquemment pendant un redimensionnement continu (Windows peut en
+        # envoyer plusieurs dizaines par seconde) en un seul redessin toutes
+        # les ~16 ms : ça évite de saturer la boucle Tk et garde le
+        # redimensionnement fluide, y compris avec plusieurs cartes à
+        # l'écran en même temps.
+        if self._draw_pending:
+            return
+        self._draw_pending = True
+        self.canvas.after(16, self._draw)
+
     def _draw(self, _event=None) -> None:
-        # Mise à jour par coords() : aucun objet recréé, donc fluide même
-        # pendant un redimensionnement continu.
+        # Mise à jour par coords() : aucun objet n'est détruit/recréé, donc
+        # fluide même pendant un redimensionnement continu.
+        self._draw_pending = False
         body_w = self.body.winfo_reqwidth()
         body_h = self.body.winfo_reqheight()
         cw = self.canvas.winfo_width()
@@ -217,10 +615,13 @@ class RoundedCard(tk.Frame):
         else:
             self.canvas.coords(self._card_item, *points)
         self.canvas.tag_lower("bg")
-        # Liseré lumineux sur l'arête supérieure (effet de profondeur).
-        self.canvas.delete("hl")
-        self.canvas.create_line(x + 3, y + 2, x + body_w - 4, y + 2,
-                                fill="#23293a", tags="hl")
+        # Liseré lumineux sur l'arête supérieure (effet de profondeur) :
+        # repositionné, jamais détruit/recréé.
+        if self._hl_item is None:
+            self._hl_item = self.canvas.create_line(
+                x + 3, y + 2, x + body_w - 4, y + 2, fill="#23293a", tags="hl")
+        else:
+            self.canvas.coords(self._hl_item, x + 3, y + 2, x + body_w - 4, y + 2)
         self.canvas.tag_raise("hl")
 
     @staticmethod
@@ -283,7 +684,7 @@ class ThemedDialog(tk.Toplevel):
         self._result = None
         self.protocol("WM_DELETE_WINDOW", self._dismiss)
 
-        card = RoundedCard(self, radius=14, page_bg=BG)
+        card = RoundedCard(self, radius=18, page_bg=BG)
         card.pack(padx=16, pady=16)
         head = tk.Frame(card.body, bg=CARD)
         head.pack(fill="x", padx=18, pady=(16, 2))
@@ -349,7 +750,7 @@ class App:
         self.root.configure(bg=BG)
         self._set_window_icon()
 
-        self.prefs = settings.load()
+        self.prefs = settings_load()
 
         self.countdown = Countdown(600)
         self.action_var = tk.StringVar(value=self.prefs.get("action", "shutdown"))
@@ -370,11 +771,24 @@ class App:
         self._alerted = set()
         self._ring_scale = 1.0
         self._ring_pending = False
+        self._glow_after_id = None
+        self._ring = None
         self._tick_id = None
         self._mini = None
         self._mini_mode = False
         self._mini_drag_dx = 0
         self._mini_drag_dy = 0
+        self._mini_drag_pending = False
+        self._mini_drag_target = (0, 0)
+
+        # Détection « la fenêtre est en train d'être déplacée/redimensionnée
+        # par l'utilisateur » : pendant ce court instant, on évite de faire
+        # travailler le canvas (updates de texte/anneau) pour ne pas entrer
+        # en concurrence avec la boucle de déplacement de Windows, ce qui
+        # provoquait des à-coups visibles. L'affichage se remet à jour tout
+        # seul dès que l'interaction s'arrête.
+        self._interacting = False
+        self._interact_after_id = None
 
         # Icônes des boutons (vraies icônes dessinées, ou texte si Pillow absent).
         self._icon_tray = None
@@ -395,6 +809,7 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.bind("<space>", self._on_space_key)
         self.root.bind("<Escape>", self._on_escape_key)
+        self.root.bind("<Configure>", self._on_root_configure, add="+")
         self.root.attributes("-topmost", self.always_on_top_var.get())
         self.root.report_callback_exception = self._report_callback_exception
 
@@ -460,31 +875,31 @@ class App:
             style.map("Big.TEntry", bordercolor=[("focus", ACCENT)])
 
             style.configure("TButton", background=CARD, foreground=TEXT,
-                            bordercolor=CARD_BORDER, padding=(16, 9), font=(FONT, 10, "bold"),
+                            bordercolor=CARD_BORDER, padding=(18, 10), font=(FONT, 10, "bold"),
                             relief="flat")
-            style.map("TButton", background=[("active", "#20242f"), ("pressed", "#282d3a"),
+            style.map("TButton", background=[("active", "#232838"), ("pressed", "#2b3143"),
                                               ("disabled", BG)],
                       bordercolor=[("active", ACCENT)],
                       foreground=[("disabled", MUTED)])
             style.configure("Accent.TButton", background=ACCENT, foreground="#ffffff",
-                            borderwidth=0, padding=(18, 10))
+                            borderwidth=0, padding=(20, 12))
             style.map("Accent.TButton",
                       background=[("active", ACCENT_DOWN), ("pressed", ACCENT_DOWN),
                                   ("disabled", "#2a2740")],
                       foreground=[("disabled", MUTED)])
             style.configure("Chip.TButton", background=FIELD, bordercolor=CARD_BORDER,
-                            padding=(11, 6), font=(FONT, 9, "bold"), relief="flat")
+                            padding=(12, 7), font=(FONT, 9, "bold"), relief="flat")
             style.map("Chip.TButton", background=[("active", ACCENT_SOFT), ("pressed", ACCENT_SOFT)],
                       bordercolor=[("active", ACCENT)],
-                      foreground=[("active", ACCENT)])
+                      foreground=[("active", ACCENT_HOVER)])
             style.configure("ChipActive.TButton", background=ACCENT, bordercolor=ACCENT,
-                            padding=(11, 6), font=(FONT, 9, "bold"), relief="flat")
+                            padding=(12, 7), font=(FONT, 9, "bold"), relief="flat")
             style.map("ChipActive.TButton",
                       background=[("active", ACCENT_DOWN), ("pressed", ACCENT_DOWN)],
                       bordercolor=[("active", ACCENT)],
                       foreground=[("active", "#ffffff")])
             style.configure("Icon.TButton", background=BG, bordercolor=BG,
-                            padding=(6, 4), font=(FONT, 11), relief="flat")
+                            padding=(7, 5), font=(FONT, 11), relief="flat")
             style.map("Icon.TButton", background=[("active", ACCENT_SOFT), ("pressed", ACCENT_SOFT)],
                       bordercolor=[("active", ACCENT)])
 
@@ -532,15 +947,15 @@ class App:
 
         # --- en-tête ---
         header = tk.Frame(outer, bg=BG)
-        header.grid(row=0, column=0, columnspan=2, sticky="ew", padx=20, pady=(18, 4))
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", padx=22, pady=(22, 6))
         if getattr(self, "_logo_photo", None) is not None:
-            tk.Label(header, image=self._logo_photo, bg=BG).pack(side="left", padx=(0, 10))
+            tk.Label(header, image=self._logo_photo, bg=BG).pack(side="left", padx=(0, 12))
         title_box = tk.Frame(header, bg=BG)
         title_box.pack(side="left")
         tk.Label(title_box, text=APP_NAME, bg=BG, fg=TEXT,
-                 font=(FONT, 18, "bold")).pack(anchor="w")
-        tk.Label(title_box, text=APP_TAGLINE, bg=BG, fg=MUTED,
-                 font=(FONT, 9)).pack(anchor="w")
+                 font=(FONT, 20, "bold")).pack(anchor="w")
+        tk.Label(title_box, text=APP_TAGLINE.upper(), bg=BG, fg=MUTED,
+                 font=(FONT, 8, "bold")).pack(anchor="w", pady=(1, 0))
 
         if self._icon_tray is not None:
             reduce_btn = ttk.Button(header, image=self._icon_tray,
@@ -567,11 +982,11 @@ class App:
         self._section_label(outer, "DURÉE").grid(
             row=2, column=0, sticky="w", padx=20, pady=(0, 4))
 
-        card_time = RoundedCard(outer, radius=16)
+        card_time = RoundedCard(outer, radius=18)
         card_time.grid(row=3, column=0, sticky="nsew", padx=(20, 10), pady=(0, 12))
 
         boxes = tk.Frame(card_time.body, bg=CARD)
-        boxes.pack(padx=14, pady=(14, 8))
+        boxes.pack(padx=16, pady=(16, 10))
         self.hours = self._time_box(boxes, "H", "0", max_value=99)
         self._sep(boxes)
         self.minutes = self._time_box(boxes, "MIN", "10", max_value=59)
@@ -579,8 +994,8 @@ class App:
         self.seconds = self._time_box(boxes, "SEC", "0", max_value=59)
 
         presets = tk.Frame(card_time.body, bg=CARD)
-        presets.pack(fill="x", padx=14, pady=(4, 14))
-        ttk.Label(presets, text="RAPIDE", style="CardBoxLabel.TLabel").pack(anchor="w", pady=(0, 5))
+        presets.pack(fill="x", padx=16, pady=(6, 16))
+        ttk.Label(presets, text="R A P I D E", style="CardBoxLabel.TLabel").pack(anchor="w", pady=(0, 5))
         presets_row = tk.Frame(presets, bg=CARD)
         presets_row.pack(fill="x")
         self.preset_buttons = []
@@ -594,13 +1009,13 @@ class App:
         self._section_label(outer, "ACTION FINALE").grid(
             row=2, column=1, sticky="w", padx=(10, 20), pady=(0, 4))
 
-        card_action = RoundedCard(outer, radius=16)
+        card_action = RoundedCard(outer, radius=18)
         card_action.grid(row=3, column=1, sticky="nsew", padx=(10, 20), pady=(0, 12))
 
         action_body = tk.Frame(card_action.body, bg=CARD)
-        action_body.pack(fill="x", padx=12, pady=10)
+        action_body.pack(fill="x", padx=16, pady=12)
         self.radio_buttons = []
-        for key, label in actions.ACTIONS.items():
+        for key, label in ACTIONS.items():
             icon = ACTION_ICONS.get(key, "•")
             rb = ttk.Radiobutton(action_body, text=f"{icon}  {label}", value=key,
                                  variable=self.action_var, command=self._save_prefs)
@@ -641,7 +1056,7 @@ class App:
 
         # --- boutons de contrôle ---
         frame_buttons = tk.Frame(outer, bg=BG)
-        frame_buttons.grid(row=6, column=0, columnspan=2, pady=(12, 6))
+        frame_buttons.grid(row=6, column=0, columnspan=2, pady=(16, 8))
         self.start_btn = ttk.Button(frame_buttons, text="▶  Démarrer", style="Accent.TButton",
                                     width=14, command=self._start)
         self.pause_btn = ttk.Button(frame_buttons, text="⏸  Pause", width=11,
@@ -688,11 +1103,17 @@ class App:
                  font=(FONT, 18, "bold")).pack(side="left", padx=2, pady=(0, 16))
 
     def _section_label(self, parent: tk.Misc, text: str) -> tk.Frame:
-        """Titre de section avec une puce violette pour l'harmonie visuelle."""
+        """Titre de section avec une puce violette pour l'harmonie visuelle.
+
+        Le texte est espacé lettre par lettre (« D U R É E ») : un vieux
+        truc de design qui donne un rendu plus soigné/« premium » à des
+        petits libellés en majuscules, à coût nul en performance (c'est
+        juste la chaîne de caractères qui change)."""
         box = tk.Frame(parent, bg=BG)
         tk.Label(box, text="●", bg=BG, fg=ACCENT,
-                 font=(FONT, 7)).pack(side="left", padx=(0, 5), pady=(0, 2))
-        ttk.Label(box, text=text, style="BoxLabel.TLabel").pack(side="left")
+                 font=(FONT, 7)).pack(side="left", padx=(0, 6), pady=(0, 2))
+        spaced = " ".join(text)
+        ttk.Label(box, text=spaced, style="BoxLabel.TLabel").pack(side="left")
         return box
 
     def _update_preset_highlight(self) -> None:
@@ -766,7 +1187,7 @@ class App:
 
     def _save_prefs(self) -> None:
         self.prefs = self._current_prefs()
-        settings.save(self.prefs)
+        settings_save(self.prefs)
 
     def _preview_typed_time(self) -> None:
         if self.countdown.running or self._paused:
@@ -802,7 +1223,7 @@ class App:
             return
         self.status_label.config(text=text)
         dot_color = {"idle": MUTED, "running": ACCENT, "paused": WARN,
-                     "error": DANGER, "done": ACCENT}.get(state, MUTED)
+                     "error": DANGER, "done": SUCCESS}.get(state, MUTED)
         self.status_dot.config(fg=dot_color)
 
     def _read_inputs(self) -> int | None:
@@ -849,8 +1270,12 @@ class App:
                 return
             self.countdown.reset(total)
             self._save_prefs()
+            # On ne réinitialise les alertes déjà déclenchées (« 5 min »,
+            # « 1 min ») que sur un vrai nouveau départ, pas sur une reprise
+            # après pause : sinon reprendre après le seuil des 5 minutes
+            # redéclenchait injustement la notification.
+            self._alerted = set()
         self._paused = False
-        self._alerted = set()
         self.countdown.start()
         self._arm_tick(200)
         self.start_btn.config(state="disabled")
@@ -903,7 +1328,7 @@ class App:
         self._set_status("Arrêté. Réglez un nouveau temps si besoin.", "idle")
 
     def _action_label(self) -> str:
-        return actions.ACTIONS[self.action_var.get()]
+        return ACTIONS[self.action_var.get()]
 
     # --- raccourcis clavier ---
 
@@ -929,19 +1354,56 @@ class App:
 
     # --- affichage ---
 
+    def _on_root_configure(self, event) -> None:
+        """Détecte qu'on est en train de déplacer ou redimensionner la
+        fenêtre principale (bougé = position qui change, redimensionné =
+        taille qui change ; les deux déclenchent <Configure> sur la
+        fenêtre elle-même). Pendant l'interaction, `_tick()` évite de
+        toucher au canvas pour ne pas ajouter de travail qui entrerait en
+        concurrence avec la boucle de déplacement/redimensionnement de
+        Windows — c'est ce qui causait les saccades. Dès que ça s'arrête
+        (~150 ms sans nouvel événement), l'affichage se remet à jour."""
+        if event.widget is not self.root:
+            return
+        self._interacting = True
+        if self._interact_after_id is not None:
+            self.root.after_cancel(self._interact_after_id)
+        self._interact_after_id = self.root.after(150, self._end_interacting)
+
+    def _end_interacting(self) -> None:
+        self._interact_after_id = None
+        self._interacting = False
+        # On rattrape immédiatement l'affichage : pendant l'interaction, le
+        # texte du temps restant n'était pas mis à jour.
+        if self.countdown.running or self._paused:
+            self._refresh_display()
+
     def _redraw_ring(self, _event=None) -> None:
         """Redessine l'anneau de temps restant à l'échelle du canvas,
         pour qu'il s'adapte à la taille de la fenêtre.
 
-        Debounce : pendant un redimensionnement continu, le redessin n'est
-        fait qu'une fois toutes les ~30 ms, ce qui garde le mouvement fluide.
+        Debounce : pendant un redimensionnement continu, la géométrie
+        n'est recalculée qu'une fois toutes les ~30 ms (mouvement fluide),
+        mais le halo lumineux (coûteux : redimensionnement Pillow) n'est
+        redessiné qu'une fois le redimensionnement terminé (~120 ms sans
+        nouvel événement), pour éviter les saccades pendant qu'on tire sur
+        le bord de la fenêtre.
         """
-        if self._ring_pending:
-            return
-        self._ring_pending = True
-        self.root.after(30, self._redraw_ring_now)
+        if not self._ring_pending:
+            self._ring_pending = True
+            self.root.after(30, self._redraw_ring_now)
+        if self._glow_after_id is not None:
+            self.root.after_cancel(self._glow_after_id)
+        self._glow_after_id = self.root.after(120, self._paint_glow)
 
     def _redraw_ring_now(self) -> None:
+        """Met à jour la position/taille des éléments de l'anneau.
+
+        Les objets canvas sont créés une seule fois puis simplement
+        déplacés/redimensionnés (coords/itemconfig) au lieu d'être détruits
+        et recréés à chaque redimensionnement : c'est nettement plus fluide,
+        surtout sur du matériel modeste.
+        """
         self._ring_pending = False
         cw = self.canvas.winfo_width()
         ch = self.canvas.winfo_height()
@@ -952,26 +1414,45 @@ class App:
         self._ring_scale = min(max(min(cw, ch) / 200.0, 0.5), 2.0)
         s = self._ring_scale
         cx, cy = cw / 2, ch / 2
-        self.canvas.delete("all")
-        self._ring_halo = self.canvas.create_oval(
-            cx - 90 * s, cy - 90 * s, cx + 90 * s, cy + 90 * s,
-            outline=CARD_BORDER, width=max(1, s))
-        self._ring_bg = self.canvas.create_oval(
-            cx - 83 * s, cy - 83 * s, cx + 83 * s, cy + 83 * s,
-            outline=CARD_BORDER, width=max(2, 12 * s))
-        self._ring = self.canvas.create_arc(
-            cx - 83 * s, cy - 83 * s, cx + 83 * s, cy + 83 * s,
-            start=90, extent=0, style="arc", outline=ACCENT, width=max(2, 12 * s))
-        self.time_label = self.canvas.create_text(
-            cx, cy - 8 * s, text=format_time(self.countdown.total),
-            font=(FONT, max(14, int(30 * s)), "bold"), fill=ACCENT)
-        self.duration_label = self.canvas.create_text(
-            cx, cy + 22 * s, text="", font=(FONT, max(7, int(9 * s))), fill=MUTED)
-        # Halo lumineux doux derrière l'anneau (couleur selon l'état).
         self._glow_cx, self._glow_cy = cx, cy
         self._glow_scale = s
-        self._glow_key = self._current_glow_key()
-        self._paint_glow()
+
+        if getattr(self, "_ring", None) is None:
+            # Première construction : on crée les objets canvas.
+            self._ring_halo = self.canvas.create_oval(
+                cx - 90 * s, cy - 90 * s, cx + 90 * s, cy + 90 * s,
+                outline=CARD_BORDER, width=max(1, s))
+            self._ring_bg = self.canvas.create_oval(
+                cx - 83 * s, cy - 83 * s, cx + 83 * s, cy + 83 * s,
+                outline=CARD_BORDER, width=max(2, 12 * s))
+            self._ring = self.canvas.create_arc(
+                cx - 83 * s, cy - 83 * s, cx + 83 * s, cy + 83 * s,
+                start=90, extent=0, style="arc", outline=ACCENT, width=max(2, 12 * s))
+            self.time_label = self.canvas.create_text(
+                cx, cy - 8 * s, text=format_time(self.countdown.total),
+                font=(FONT, max(14, int(30 * s)), "bold"), fill=ACCENT)
+            self.duration_label = self.canvas.create_text(
+                cx, cy + 22 * s, text="", font=(FONT, max(7, int(9 * s))), fill=MUTED)
+            self._glow_key = self._current_glow_key()
+            self._paint_glow()
+        else:
+            # Redimensionnement : on repositionne les objets existants.
+            self.canvas.coords(self._ring_halo, cx - 90 * s, cy - 90 * s,
+                               cx + 90 * s, cy + 90 * s)
+            self.canvas.itemconfig(self._ring_halo, width=max(1, s))
+            self.canvas.coords(self._ring_bg, cx - 83 * s, cy - 83 * s,
+                               cx + 83 * s, cy + 83 * s)
+            self.canvas.itemconfig(self._ring_bg, width=max(2, 12 * s))
+            self.canvas.coords(self._ring, cx - 83 * s, cy - 83 * s,
+                               cx + 83 * s, cy + 83 * s)
+            self.canvas.itemconfig(self._ring, width=max(2, 12 * s))
+            self.canvas.coords(self.time_label, cx, cy - 8 * s)
+            self.canvas.coords(self.duration_label, cx, cy + 22 * s)
+            self._refresh_display()
+        # L'ordre d'empilement peut être perturbé par create_image (glow) :
+        # on s'assure que l'anneau et le texte restent au-dessus.
+        for item in ("_ring_halo", "_ring_bg", "_ring", "time_label", "duration_label"):
+            self.canvas.tag_raise(getattr(self, item))
 
     def _current_glow_key(self) -> str | None:
         """Couleur du halo selon l'état du compte à rebours."""
@@ -1045,11 +1526,28 @@ class App:
             self.root.after_cancel(self._tick_id)
         self._tick_id = self.root.after(delay, self._tick)
 
+    def _window_visible(self) -> bool:
+        """False quand la fenêtre principale est réduite dans le tray
+        (withdraw) : dans ce cas, personne ne regarde l'anneau/le texte,
+        inutile de le redessiner plusieurs fois par seconde."""
+        try:
+            return self.root.state() != "withdrawn"
+        except Exception:
+            return True
+
     def _tick(self) -> None:
         self._tick_id = None
         if self.countdown.running:
             remaining = self.countdown.remaining_left()
-            self._refresh_display(remaining)
+            # Pendant un déplacement/redimensionnement actif de la fenêtre,
+            # on n'écrit pas dans le canvas : Windows traite le déplacement
+            # dans une boucle qui laisse peu de place à d'autres mises à
+            # jour graphiques, donc y ajouter du travail ici se voyait
+            # comme des saccades. `_end_interacting()` rattrape l'affichage
+            # dès que ça s'arrête.
+            visible = self._window_visible() and not self._interacting
+            if visible:
+                self._refresh_display(remaining)
             self._check_alerts(remaining)
             if remaining <= 10:
                 self._blink_counter += 1
@@ -1064,11 +1562,15 @@ class App:
                 self._update_tray("running")
             if self.countdown.is_finished() and not self._finishing:
                 self._finish()
-            self._update_mini()
-            # Pendant le compte à rebours : rafraîchissement rapide.
-            self._arm_tick(200)
+            if self._mini_mode:
+                self._update_mini()
+            # Pendant le compte à rebours : rafraîchissement rapide si la
+            # fenêtre (ou le mode mini) est visible, plus lent sinon
+            # (fenêtre cachée dans le tray) pour économiser le CPU/batterie.
+            self._arm_tick(200 if (visible or self._mini_mode) else 1000)
         elif self._paused:
-            self._update_mini()
+            if self._mini_mode:
+                self._update_mini()
             # En pause : rafraîchissement lent (économie de CPU).
             self._arm_tick(500)
         # Au repos : la boucle s'arrête, consommation quasi nulle.
@@ -1111,7 +1613,7 @@ class App:
         overlay.transient(self.root)
         overlay.attributes("-topmost", True)
         self._overlay = overlay
-        card = RoundedCard(overlay, radius=16, page_bg=BG)
+        card = RoundedCard(overlay, radius=18, page_bg=BG)
         card.pack(padx=18, pady=18)
         tk.Label(card.body, text="Compte à rebours terminé", bg=CARD, fg=TEXT,
                  font=(FONT, 14, "bold")).pack(padx=24, pady=(18, 3))
@@ -1187,7 +1689,7 @@ class App:
         self._execute_after_id = None
         self._close_overlay()
         try:
-            actions.execute(self.action_var.get())
+            execute_action(self.action_var.get())
         except Exception as exc:
             self._set_status(f"Erreur lors de l'action : {exc}", "error")
         self._finishing = False
@@ -1285,11 +1787,30 @@ class App:
     def _mini_drag_start(self, event) -> None:
         self._mini_drag_dx = event.x_root - self._mini.winfo_x()
         self._mini_drag_dy = event.y_root - self._mini.winfo_y()
+        self._mini_drag_pending = False
 
     def _mini_drag_move(self, event) -> None:
-        self._mini.geometry(
-            f"+{event.x_root - self._mini_drag_dx}+{event.y_root - self._mini_drag_dy}"
+        # <B1-Motion> peut envoyer beaucoup plus d'événements que la
+        # fenêtre n'a besoin d'images (la souris est échantillonnée bien
+        # plus vite que l'affichage) : on ne garde que la dernière position
+        # et on ne fait qu'un seul appel geometry() par passage dans la
+        # boucle d'événements (via after_idle), au lieu d'un appel par
+        # événement de souris. geometry() force Windows à repositionner
+        # toute la fenêtre, donc en appeler plusieurs fois de suite pour un
+        # seul mouvement visible causait des saccades.
+        self._mini_drag_target = (
+            event.x_root - self._mini_drag_dx, event.y_root - self._mini_drag_dy
         )
+        if not getattr(self, "_mini_drag_pending", False):
+            self._mini_drag_pending = True
+            self._mini.after_idle(self._mini_drag_apply)
+
+    def _mini_drag_apply(self) -> None:
+        self._mini_drag_pending = False
+        if self._mini is None or not self._mini.winfo_exists():
+            return
+        x, y = self._mini_drag_target
+        self._mini.geometry(f"+{x}+{y}")
 
     def _update_mini(self) -> None:
         """Met à jour l'affichage du mini anneau (temps, arc, couleur)."""
@@ -1343,6 +1864,12 @@ class App:
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
+        # La fenêtre a pu passer plusieurs secondes sans être redessinée
+        # (rafraîchissement ralenti pendant qu'elle était cachée dans le
+        # tray) : on force une mise à jour immédiate pour éviter d'afficher
+        # un temps restant périmé le temps que le prochain tick arrive.
+        if self.countdown.running or self._paused:
+            self._refresh_display()
 
     def _minimize_to_tray(self) -> None:
         if self.tray.available:
@@ -1413,3 +1940,75 @@ class App:
         if not self.tray.available:
             self._set_status("Barre des tâches indisponible (pystray absent) : la croix ferme l'application.", "idle")
         self.root.mainloop()
+
+
+# ============================================================================
+# Point d'entrée
+# ============================================================================
+
+def _handle_exception(exc_type, exc_value, exc_tb) -> None:
+    """Logge toute erreur fatale dans %APPDATA%\\Extinia\\error.log."""
+    log_exception(exc_type, exc_value, exc_tb)
+
+
+sys.excepthook = _handle_exception
+
+
+if __name__ == "__main__":
+    App().run()
+
+
+# ============================================================================
+# CHANGELOG de la fusion / correction (voir docstring en haut de fichier)
+# ============================================================================
+#
+# BUGS CORRIGES
+# -------------
+# 1. [Critique] tray.py utilisait des annotations de type non protégées
+#    (`-> Image.Image`, `-> ImageFont.ImageFont`). Python évalue les
+#    annotations au moment de la définition de la fonction : si Pillow
+#    n'était pas installé, `Image`/`ImageFont` n'existaient pas du tout et
+#    le simple `import tray` levait un NameError, plantant TOUTE
+#    l'application au démarrage — alors que le code était censé se
+#    dégrader proprement en "mode sans icône". Corrigé en mettant ces
+#    annotations entre guillemets (chaînes), comme c'était déjà fait
+#    ailleurs dans app.py pour `_to_photo`.
+#
+# 2. Reprendre un compte à rebours après une pause réinitialisait la liste
+#    des alertes déjà envoyées (_alerted), ce qui pouvait redéclencher une
+#    notification "Encore 5 minutes" déjà passée. Corrigé : les alertes ne
+#    sont réinitialisées que lors d'un vrai nouveau départ.
+#
+# FLUIDITE
+# --------
+# 3. L'anneau de temps restant faisait `canvas.delete("all")` puis
+#    recréait tous les objets (ovales, arc, textes) à chaque tick du
+#    redimensionnement (jusqu'à ~33 fois/seconde pendant qu'on tire le
+#    bord de la fenêtre). Corrigé : les objets sont créés une seule fois
+#    puis simplement repositionnés (coords/itemconfig), ce qui est
+#    beaucoup plus fluide, surtout sur du matériel modeste.
+#
+# 4. Le halo lumineux derrière l'anneau (redimensionnement Pillow +
+#    encodage PNG) était recalculé à chaque tick de redimensionnement
+#    (~30 ms). Corrigé : il n'est redessiné qu'une fois le redimensionnement
+#    terminé (~120 ms sans nouvel événement), ce qui supprime les saccades
+#    pendant qu'on redimensionne la fenêtre sans changer le rendu final.
+#
+# CONSOMMATION CPU / BATTERIE
+# ----------------------------
+# 5. L'icône de la barre des tâches (image Pillow régénérée : dessin,
+#    mesure de texte, etc.) était reconstruite à chaque mise à jour du
+#    tray, même quand l'image affichée à l'écran ne changeait pas
+#    réellement. Corrigé : un cache mémorise le dernier état dessiné et
+#    saute la regénération si rien n'a changé.
+#
+# 6. Quand la fenêtre principale est réduite dans le tray (et le mode mini
+#    n'est pas actif), plus personne ne regarde l'anneau : il continuait
+#    pourtant à se redessiner 5 fois par seconde. Corrigé : le
+#    rafraîchissement passe à 1 fois par seconde tant que rien n'est
+#    visible à l'écran, et une mise à jour immédiate est forcée dès que la
+#    fenêtre est réaffichée (pour ne pas montrer un temps périmé).
+#
+# 7. Les imports de Pillow/pystray étaient dupliqués (une fois dans
+#    tray.py, une fois dans app.py). Unifiés en un seul bloc au sommet du
+#    fichier.
