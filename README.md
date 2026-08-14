@@ -1,6 +1,6 @@
 # Extinia
 
-**v1.1 · par dodosiiii**
+**v1.2 · par dodosiiii**
 
 Application Windows avec interface graphique : réglez un compte à rebours personnalisé et
 choisissez l'action à exécuter automatiquement à la fin (éteindre le PC, mettre en veille,
